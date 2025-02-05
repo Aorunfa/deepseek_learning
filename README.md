@@ -1,0 +1,2 @@
+# deepseek_learning
+一个快速学习deepseek v3模型以及r1强化学习的仓库，侧重与理解技术报告模型设计细节
