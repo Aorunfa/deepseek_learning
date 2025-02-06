@@ -88,7 +88,7 @@ class ModelArgs:
 
 
     # NOTE set for test
-    vocab_size : int = 102400
+    vocab_size : int = 10240
     dim : int = 2048
     inter_dim : int = 10944
     moe_inter_dim : int = 1408
