@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
@@ -8,13 +8,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
-
 from kernel import act_quant, weight_dequant, fp8_gemm
 
 
 world_size = 1
 rank = 0
-block_size = 128                                        # 量化块大小
+block_size = 128                                        # 量化块大小 128×128
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
@@ -123,7 +122,9 @@ class ParallelEmbedding(nn.Module):
         self.part_vocab_size = (vocab_size // world_size)                   # 将embedding矩阵平分到每一个word
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
-        self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        # self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        self.weight = nn.Parameter(torch.ones(self.part_vocab_size, self.dim, dtype=torch.get_default_dtype()))
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -145,7 +146,9 @@ class ParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if world_size > 1:
             y[mask] = 0                                                     # 将非word对应的token embedding归零
+            print('no reduce', y.sum())
             dist.all_reduce(y)                                              # 加总所有word的embedding
+            print('reduce', y.sum())
         return y
 
 
@@ -281,7 +284,7 @@ class RowParallelLinear(Linear):
         """
         y = linear(x, self.weight)
         if world_size > 1:
-            dist.all_reduce(y)                          # 加总所有进程
+            dist.all_reduce(y)                        
         if self.bias is not None:
             y += self.bias
         return y
@@ -790,7 +793,7 @@ class Transformer(nn.Module):
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
         self.norm = RMSNorm(args.dim)
-        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())  # 解耦embedding和输出头   
+        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())   
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
     @torch.inference_mode()
@@ -810,31 +813,48 @@ class Transformer(nn.Module):
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) # triu_ 指定对角线, 下零三角
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)       # triu_ 指定对角线, 下零三角
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
-        h = self.norm(h)[:, -1]                                                               # get the last token, for inference
+        h = self.norm(h)[:, -1]                                                                     # get the last token, for inference
         logits = self.head(h)
         if world_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(world_size)]                # 收集各个进程结果  
+            all_logits = [torch.empty_like(logits) for _ in range(world_size)]                      # 收集各个进程结果  
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
         return logits
 
-
 if __name__ == "__main__":
-    
+
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    if world_size > 1:
+        dist.init_process_group("nccl")
+    torch.set_default_device(local_rank)
     torch.set_default_dtype(torch.bfloat16)
-    torch.set_default_device("cuda")
-    torch.manual_seed(0)
+    torch.set_num_threads(8)
+    torch.manual_seed(965)
+
     args = ModelArgs()
     x = torch.randint(0, args.vocab_size, (2, 128))
     model = Transformer(args)
     print(model(x).size())
 
+    if world_size > 1:
+        dist.destroy_process_group()
+    
+
+    """
+    启动分布式: torchrun --nnodes 1 --nproc-per-node 2 v3/model.py
+    """
+
     """
     deepseek TODO:
         rope旋转位置编码需要进阶
+    
         分布式推理如何初始化环境，需要整理一个简单的分布式推理脚本
+            torchrun --nnodes 1 --nproc-per-node 2 /home/chaofeng/deepseek_learning/v3/model.py
 
+torchrun --nnodes 2 --nproc-per-node 8 --node-rank $RANK --master-addr $ADDR generate.py --ckpt-path /path/to/DeepSeek-V3-Demo --config configs/config_671B.json --interactive --temperature 0.7 --max-new-tokens 200
     """
