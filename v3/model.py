@@ -14,7 +14,7 @@ from kernel import act_quant, weight_dequant, fp8_gemm
 
 world_size = 1
 rank = 0
-block_size = 128
+block_size = 128                                        # 量化块大小
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
@@ -32,26 +32,26 @@ class ModelArgs:
         inter_dim (int): Intermediate dimension for MLP layers.
         moe_inter_dim (int): Intermediate dimension for MoE layers.
         n_layers (int): Number of transformer layers.
-        n_dense_layers (int): Number of dense layers in the model.
+        n_dense_layers (int): Number of dense layers in the model.                                  # n_layers - n_dense_layers for moe
         n_heads (int): Number of attention heads.
-        n_routed_experts (int): Number of routed experts for MoE layers.
+        n_routed_experts (int): Number of routed experts for MoE layers.   
         n_shared_experts (int): Number of shared experts for MoE layers.
-        n_activated_experts (int): Number of activated experts in MoE layers.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
-        score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
-        route_scale (float): Scaling factor for routing scores.
-        q_lora_rank (int): LoRA rank for query projections.
+        n_activated_experts (int): Number of activated experts in MoE layers.                       # top k  shared experts
+        n_expert_groups (int): Number of expert groups.                                             # TODO
+        n_limited_groups (int): Number of limited groups for MoE routing.                           # TODO
+        score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.   
+        route_scale (float): Scaling factor for routing scores.                                     # logits scale
+        q_lora_rank (int): LoRA rank for query projections.                                         
         kv_lora_rank (int): LoRA rank for key-value projections.
-        qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
-        qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
-        v_head_dim (int): Dimension for value projections.
+        qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.  # TODO
+        qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.         # TODO
+        v_head_dim (int): Dimension for value projections.                                          # TODO
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
-        beta_fast (int): Fast beta correction factor.
-        beta_slow (int): Slow beta correction factor.
-        mscale (float): Scaling factor for extended attention.
+        beta_fast (int): Fast beta correction factor.                                               # TODO
+        beta_slow (int): Slow beta correction factor.                                               # TODO
+        mscale (float): Scaling factor for extended attention.                                      # TODO
     """
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
@@ -120,7 +120,7 @@ class ParallelEmbedding(nn.Module):
         self.vocab_size = vocab_size
         self.dim = dim
         assert vocab_size % world_size == 0
-        self.part_vocab_size = (vocab_size // world_size)   ###### moe 分片？
+        self.part_vocab_size = (vocab_size // world_size)                   # 将embedding矩阵平分到每一个word
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
@@ -139,13 +139,13 @@ class ParallelEmbedding(nn.Module):
             ValueError: If `world_size` is not defined.
         """
         if world_size > 1:
-            mask = (x < self.vocab_start_idx) | (x >= self.vocab_end_idx)
-            x = x - self.vocab_start_idx
+            mask = (x < self.vocab_start_idx) | (x >= self.vocab_end_idx)   # 对应word只映射相应跨度的token_id
+            x = x - self.vocab_start_idx                                    # 定位到word token embedding
             x[mask] = 0
         y = F.embedding(x, self.weight)
         if world_size > 1:
-            y[mask] = 0
-            dist.all_reduce(y)
+            y[mask] = 0                                                     # 将非word对应的token embedding归零
+            dist.all_reduce(y)                                              # 加总所有word的embedding
         return y
 
 
@@ -176,14 +176,14 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     elif gemm_impl == "bf16":
         weight = weight_dequant(weight, weight.scale)
         return F.linear(x, weight, bias)
-    else:
-        x, scale = act_quant(x, block_size)
+    else:                                                                       # for fp8 compute
+        x, scale = act_quant(x, block_size)                 
         y = fp8_gemm(x, scale, weight, weight.scale)
         if bias is not None:
             y += bias
         return y
 
-
+"""带量化参数线性层"""
 class Linear(nn.Module):
     """
     Custom linear layer with support for quantized weights and optional bias.
@@ -201,14 +201,14 @@ class Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
-        if self.weight.element_size() == 1: # for fp8
-            scale_out_features = (out_features + block_size - 1) // block_size
+        if self.weight.element_size() == 1:                                                                                         # for fp8 compute                             
+            scale_out_features = (out_features + block_size - 1) // block_size                                                      # 保证out_features无法整除block_size时，余下部分填充值1，作为一个量化块
             scale_in_features = (in_features + block_size - 1) // block_size
-            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))  # 量化参数用于act_quant和weight_dequant
         else:
             self.register_parameter("scale", None)
         if bias:
-            self.bias = nn.Parameter(torch.empty(self.part_out_features)) # fsp?
+            self.bias = nn.Parameter(torch.empty(self.part_out_features))
         else:
             self.register_parameter("bias", None)
 
@@ -281,7 +281,7 @@ class RowParallelLinear(Linear):
         """
         y = linear(x, self.weight)
         if world_size > 1:
-            dist.all_reduce(y)
+            dist.all_reduce(y)                          # 加总所有进程
         if self.bias is not None:
             y += self.bias
         return y
@@ -313,7 +313,7 @@ class RMSNorm(nn.Module):
         """
         return F.rms_norm(x, (self.dim,), self.weight, self.eps)
 
-
+# TODO 进一步学习rope
 def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
@@ -384,14 +384,14 @@ def precompute_freqs_cis(args: ModelArgs) -> torch.Tensor:
         return ramp_func
 
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-    if seqlen > args.original_seq_len:
+    if seqlen > args.original_seq_len:                                                              # 当最大长度超过原始长度，延展rope编码
         low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
     t = torch.arange(seqlen)
-    freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    freqs = torch.outer(t, freqs)                                                                   # t阵列成(len(t), len(freqs)), 与freqs逐行相乘
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)                                          # 极坐标转换复数表示, torch.polar(模长, 角度)
     return freqs_cis
 
 
@@ -433,12 +433,12 @@ class MLA(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.n_heads = args.n_heads
-        self.n_local_heads = args.n_heads // world_size     #  这个怎么理解？？？
+        self.n_local_heads = args.n_heads // world_size                     # 将head平分到每个进程
         self.q_lora_rank = args.q_lora_rank
-        self.kv_lora_rank = args.kv_lora_rank
-        self.qk_nope_head_dim = args.qk_nope_head_dim
-        self.qk_rope_head_dim = args.qk_rope_head_dim
-        self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
+        self.kv_lora_rank = args.kv_lora_rank                               # lora dim to kv_lora_rank
+        self.qk_nope_head_dim = args.qk_nope_head_dim                       # 不增加位置编码的q_nope, k_nope的维度
+        self.qk_rope_head_dim = args.qk_rope_head_dim                       # 增加位置编码的q_pe, k_pe的维度
+        self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim   
         self.v_head_dim = args.v_head_dim
 
         if self.q_lora_rank == 0:
@@ -451,7 +451,7 @@ class MLA(nn.Module):
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
-        self.softmax_scale = self.qk_head_dim ** -0.5
+        self.softmax_scale = self.qk_head_dim ** -0.5                       # for scale qk^T
         if args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
@@ -501,8 +501,8 @@ class MLA(nn.Module):
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)
+            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)                     # catch 低秩kv, k与v相同
+            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)                      # catch 位置编码后的k
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
@@ -511,9 +511,9 @@ class MLA(nn.Module):
         if attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
-            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
-        x = self.wo(x.flatten(2))
+            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])      # 计算注意力v
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])             
+        x = self.wo(x.flatten(2))                                                         
         return x
 
 
@@ -576,11 +576,16 @@ class Gate(nn.Module):
         super().__init__()
         self.dim = args.dim
         self.topk = args.n_activated_experts
-        self.n_groups = args.n_expert_groups
-        self.topk_groups = args.n_limited_groups
+        self.n_groups = args.n_expert_groups            # 所有专精专家进行分组，每组内选择最
+        self.topk_groups = args.n_limited_groups        # TODO
+
+        self.n_groups = 4
+        self.topk_groups = 2
+
+
         self.score_func = args.score_func
         self.route_scale = args.route_scale
-        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))                    # 专精专家评分
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -601,7 +606,7 @@ class Gate(nn.Module):
         original_scores = scores
         if self.bias is not None:
             scores = scores + self.bias
-        if self.n_groups > 1:
+        if self.n_groups > 1:                                       # 分组过滤选择最强的组
             scores = scores.view(x.size(0), self.n_groups, -1)
             if self.bias is None:
                 group_scores = scores.amax(dim=-1)
@@ -609,15 +614,15 @@ class Gate(nn.Module):
                 group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
             indices = group_scores.topk(self.topk_groups, dim=-1)[1]
             mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)
-            scores = (scores * mask.unsqueeze(-1)).flatten(1)
+            scores = (scores * mask.unsqueeze(-1)).flatten(1)       # 对每个token只保留最强组对应专家的评分
         indices = torch.topk(scores, self.topk, dim=-1)[1]
         weights = original_scores.gather(1, indices)
         if self.score_func == "sigmoid":
             weights /= weights.sum(dim=-1, keepdim=True)
-        weights *= self.route_scale
+        weights *= self.route_scale                                 # scale logits
         return weights.type_as(x), indices
 
-
+"""每个专家使用MLP层"""
 class Expert(nn.Module):
     """
     Expert layer for Mixture-of-Experts (MoE) models.
@@ -677,14 +682,14 @@ class MoE(nn.Module):
         self.dim = args.dim
         assert args.n_routed_experts % world_size == 0
         self.n_routed_experts = args.n_routed_experts
-        self.n_local_experts = args.n_routed_experts // world_size
+        self.n_local_experts = args.n_routed_experts // world_size                          # 将每个experts平分到每一个进程中
         self.n_activated_experts = args.n_activated_experts
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
-        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+                                      for i in range(self.n_routed_experts)])               # 每个进程只实例化对应的专家
+        self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)     # TODO
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -710,7 +715,7 @@ class MoE(nn.Module):
         z = self.shared_experts(x)
         if world_size > 1:
             dist.all_reduce(y)
-        return (y + z).view(shape)
+        return (y + z).view(shape)  # add shared and routed experts
 
 
 class Block(nn.Module):
@@ -750,7 +755,7 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
-        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)    # residule
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -785,7 +790,7 @@ class Transformer(nn.Module):
         for layer_id in range(args.n_layers):
             self.layers.append(Block(layer_id, args))
         self.norm = RMSNorm(args.dim)
-        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
+        self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())  # 解耦embedding和输出头   
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
 
     @torch.inference_mode()
@@ -805,13 +810,13 @@ class Transformer(nn.Module):
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) # triu_ 指定对角线
+            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1) # triu_ 指定对角线, 下零三角
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.norm(h)[:, -1]                                                               # get the last token, for inference
         logits = self.head(h)
         if world_size > 1:
-            all_logits = [torch.empty_like(logits) for _ in range(world_size)]
+            all_logits = [torch.empty_like(logits) for _ in range(world_size)]                # 收集各个进程结果  
             dist.all_gather(all_logits, logits)
             logits = torch.cat(all_logits, dim=-1)
         return logits
@@ -826,3 +831,10 @@ if __name__ == "__main__":
     x = torch.randint(0, args.vocab_size, (2, 128))
     model = Transformer(args)
     print(model(x).size())
+
+    """
+    deepseek TODO:
+        rope旋转位置编码需要进阶
+        分布式推理如何初始化环境，需要整理一个简单的分布式推理脚本
+
+    """
