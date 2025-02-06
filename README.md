@@ -7,7 +7,10 @@
 学习讲解资料来自[EZ.Encoder](https://www.youtube.com/@ez.encoder.academy)
 
 ## 代码说明
-deepv3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size, dist.all_reduce()`
+deepv3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size, dist.all_reduce()`。
+
+代码阅读建议先跳过linear函数中量化与反量化操作
+
 
 ## 模型结构
 ### MLA 多头低秩注意力

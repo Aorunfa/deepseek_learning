@@ -36,18 +36,18 @@ class ModelArgs:
         n_routed_experts (int): Number of routed experts for MoE layers.   
         n_shared_experts (int): Number of shared experts for MoE layers.
         n_activated_experts (int): Number of activated experts in MoE layers.                       # top k  shared experts
-        n_expert_groups (int): Number of expert groups.                                             # TODO
-        n_limited_groups (int): Number of limited groups for MoE routing.                           # TODO
+        n_expert_groups (int): Number of expert groups.                                             # 专精专家分组过滤，组数设置
+        n_limited_groups (int): Number of limited groups for MoE routing.                           # 专精专家分组过滤，保留最多组数
         score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.   
         route_scale (float): Scaling factor for routing scores.                                     # logits scale
         q_lora_rank (int): LoRA rank for query projections.                                         
         kv_lora_rank (int): LoRA rank for key-value projections.
-        qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.  # TODO
-        qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.         # TODO
-        v_head_dim (int): Dimension for value projections.                                          # TODO
-        original_seq_len (int): Original sequence length.
-        rope_theta (float): Base for rotary positional encoding.
-        rope_factor (float): Scaling factor for extended sequence lengths.
+        qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.  # qk内积分为有旋转位置编码与无旋转位置编码，设置无旋转位置编码的向量维度
+        qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.         # 设置有旋转位置编码的向量维度
+        v_head_dim (int): Dimension for value projections.                                          # 设置v的向量维度
+        original_seq_len (int): Original sequence length.                                           # TODO 需要完整搞明白ROPE与ROPE的延展原理才能进阶
+        rope_theta (float): Base for rotary positional encoding.                                    # TODO
+        rope_factor (float): Scaling factor for extended sequence lengths.                          # TODO
         beta_fast (int): Fast beta correction factor.                                               # TODO
         beta_slow (int): Slow beta correction factor.                                               # TODO
         mscale (float): Scaling factor for extended attention.                                      # TODO
@@ -87,7 +87,7 @@ class ModelArgs:
     mscale: float = 1.
 
 
-    # 16b
+    # NOTE set for test
     vocab_size : int = 102400
     dim : int = 2048
     inter_dim : int = 10944
@@ -106,6 +106,7 @@ class ModelArgs:
     v_head_dim : int = 128
     mscale : int = 0.707
 
+"""分布的embedding层"""
 class ParallelEmbedding(nn.Module):
     """
     Embedding layer with parallelism support across distributed processes.
@@ -119,11 +120,11 @@ class ParallelEmbedding(nn.Module):
         self.vocab_size = vocab_size
         self.dim = dim
         assert vocab_size % world_size == 0
-        self.part_vocab_size = (vocab_size // world_size)                   # 将embedding矩阵平分到每一个word
+        self.part_vocab_size = (vocab_size // world_size)                                                       # 将embedding矩阵平分到每一个进程 用于分布式推理
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         # self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
-        self.weight = nn.Parameter(torch.ones(self.part_vocab_size, self.dim, dtype=torch.get_default_dtype()))
+        self.weight = nn.Parameter(torch.ones(self.part_vocab_size, self.dim, dtype=torch.get_default_dtype())) # 用于对比dist.reduce前后的输出变化
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -227,7 +228,7 @@ class Linear(nn.Module):
         """
         return linear(x, self.weight, self.bias)
 
-
+"""按照列拆分线性层参数矩阵，做分布式"""
 class ColumnParallelLinear(Linear):
     """
     Linear layer with column parallelism, splitting output features across distributed processes.
@@ -256,7 +257,7 @@ class ColumnParallelLinear(Linear):
         y = linear(x, self.weight, self.bias)
         return y
 
-
+"""按照行拆分线性层参数矩阵，做分布式，同样需要对每一个输入的维度进行对应拆分，最后进行聚合"""
 class RowParallelLinear(Linear):
     """
     Linear layer with row parallelism, splitting input features across distributed processes.
@@ -438,7 +439,7 @@ class MLA(nn.Module):
         self.n_heads = args.n_heads
         self.n_local_heads = args.n_heads // world_size                     # 将head平分到每个进程
         self.q_lora_rank = args.q_lora_rank
-        self.kv_lora_rank = args.kv_lora_rank                               # lora dim to kv_lora_rank
+        self.kv_lora_rank = args.kv_lora_rank                               # 降低kv维度
         self.qk_nope_head_dim = args.qk_nope_head_dim                       # 不增加位置编码的q_nope, k_nope的维度
         self.qk_rope_head_dim = args.qk_rope_head_dim                       # 增加位置编码的q_pe, k_pe的维度
         self.qk_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim   
@@ -454,7 +455,7 @@ class MLA(nn.Module):
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
         self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
-        self.softmax_scale = self.qk_head_dim ** -0.5                       # for scale qk^T
+        self.softmax_scale = self.qk_head_dim ** -0.5                       # 用于scale qk^T
         if args.max_seq_len > args.original_seq_len:
             mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
@@ -504,8 +505,8 @@ class MLA(nn.Module):
             wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size) 
             wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)
             q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
-            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)                     # catch 低秩kv, k与v相同
-            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)                      # catch 位置编码后的k
+            self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)                           # catch 低秩kv, k与v相同
+            self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)                            # catch 位置编码后的k
             scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +
                       torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale
         if mask is not None:
@@ -514,7 +515,7 @@ class MLA(nn.Module):
         if attn_impl == "naive":
             x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])
         else:
-            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])      # 计算注意力v
+            x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])            # 计算注意力v
             x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])             
         x = self.wo(x.flatten(2))                                                         
         return x
@@ -852,9 +853,5 @@ if __name__ == "__main__":
     """
     deepseek TODO:
         rope旋转位置编码需要进阶
-    
-        分布式推理如何初始化环境，需要整理一个简单的分布式推理脚本
-            torchrun --nnodes 1 --nproc-per-node 2 /home/chaofeng/deepseek_learning/v3/model.py
 
-torchrun --nnodes 2 --nproc-per-node 8 --node-rank $RANK --master-addr $ADDR generate.py --ckpt-path /path/to/DeepSeek-V3-Demo --config configs/config_671B.json --interactive --temperature 0.7 --max-new-tokens 200
     """
