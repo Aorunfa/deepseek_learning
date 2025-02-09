@@ -1,4 +1,4 @@
-# deepseek_learning
+# deepseek_learning - ongoing
 一个快速学习deepseek v3模型以及r1强化学习的仓库，侧重与理解技术报告模型设计细节
 
 # 一. v3
@@ -7,8 +7,9 @@
 学习讲解资料来自[EZ.Encoder](https://www.youtube.com/@ez.encoder.academy)
 
 ## 代码说明
-deepv3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size, dist.all_reduce()`。可以按照v3/model.py阅读代码，建议先跳过linear函数中量化与反量化操作
+deepseekV3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size`, `dist.all_reduce()`等分布式推理的map-reduce的操作。
 
+可以按照v3/model.py阅读代码，建议先跳过linear函数中量化与反量化操作
 
 ## 模型结构
 ### MLA 多头低秩注意力
@@ -50,18 +51,15 @@ MTP经典方式：并行与串行
 
 MTP开源的推理代码未使用，只在训练时使用。增加一个简单实现
 
-### fp8量化训练
-量化参数和linear模组
+### fp8量化操作
+量化参数和linear模组，此处只对开源的推理代码中的量化相关的操作进行解读
 
 量化函数
 
 反量化函数
 
 
-
 ### 加速通信方法
-
-### r1知识提炼
 
 
 # 二. r1
