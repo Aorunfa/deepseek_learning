@@ -13,8 +13,8 @@ from kernel import act_quant, weight_dequant, fp8_gemm
 
 world_size = 1
 rank = 0
-block_size = 128                                        # 量化块大小 128×128
-gemm_impl: Literal["bf16", "fp8"] = "bf16"
+block_size = 128                                        # 量化块大小 128的跨度
+gemm_impl: Literal["bf16", "fp8"] = "fp8"
 attn_impl: Literal["naive", "absorb"] = "absorb"
 
 @dataclass
@@ -54,7 +54,7 @@ class ModelArgs:
     """
     max_batch_size: int = 8
     max_seq_len: int = 4096 * 4
-    dtype: Literal["bf16", "fp8"] = "bf16"
+    dtype: Literal["bf16", "fp8"] = "fp8"
     vocab_size: int = 102400
     dim: int = 2048
     inter_dim: int = 10944
@@ -90,7 +90,7 @@ class ModelArgs:
     # NOTE set for test
     vocab_size : int = 10240
     dim : int = 2048
-    inter_dim : int = 10944
+    inter_dim : int = 10880
     moe_inter_dim : int = 1408
     n_layers : int = 3
     n_dense_layers : int = 1
@@ -178,10 +178,11 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] =
     if weight.element_size() > 1:
         return F.linear(x, weight, bias)
     elif gemm_impl == "bf16":
-        weight = weight_dequant(weight, weight.scale)
+        weight = weight_dequant(weight, weight.scale)                           # 反量化权重参数
         return F.linear(x, weight, bias)
-    else:                                                                       # for fp8 compute
-        x, scale = act_quant(x, block_size)                 
+    else:                                                                       # fp8 compute
+        print('ssssss', x.size())
+        x, scale = act_quant(x, block_size)                                     # fp8量化计算                 
         y = fp8_gemm(x, scale, weight, weight.scale)
         if bias is not None:
             y += bias
@@ -205,7 +206,7 @@ class Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
-        if self.weight.element_size() == 1:                                                                                         # for fp8 compute                             
+        if self.weight.element_size() == 1:                                                                                         # 增加fp8量化参数                             
             scale_out_features = (out_features + block_size - 1) // block_size                                                      # 保证out_features无法整除block_size时，余下部分填充值1，作为一个量化块
             scale_in_features = (in_features + block_size - 1) // block_size
             self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))  # 量化参数用于act_quant和weight_dequant
@@ -826,6 +827,7 @@ class Transformer(nn.Module):
         return logits
 
 if __name__ == "__main__":
+    import time
 
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -837,11 +839,13 @@ if __name__ == "__main__":
     torch.set_num_threads(8)
     torch.manual_seed(965)
 
+    t0 = time.time()
     args = ModelArgs()
     x = torch.randint(0, args.vocab_size, (2, 128))
     model = Transformer(args)
     print(model(x).size())
 
+    print('耗时：', time.time() - t0)
     if world_size > 1:
         dist.destroy_process_group()
     

@@ -20,16 +20,16 @@ def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     Returns:
         None
     """
-    pid = tl.program_id(axis=0)
-    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    pid = tl.program_id(axis=0)                         # 一维网格点的序号
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # 计算绝对位置
     x = tl.load(x_ptr + offs).to(tl.float32)
-    s = tl.max(tl.abs(x)) / 448.
-    y = x / s
+    s = tl.max(tl.abs(x)) / 448.                        # 计算放缩系数， fp8最大正范围448
+    y = x / s                                           # 进行量化
     y = y.to(y_ptr.dtype.element_ty)
-    tl.store(y_ptr + offs, y)
-    tl.store(s_ptr + pid, s)
+    tl.store(y_ptr + offs, y)                           # 存量化值
+    tl.store(s_ptr + pid, s)                            # 存放缩系数
 
-
+"""执行fp8量化"""
 def act_quant(x: torch.Tensor, block_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantizes the input tensor `x` using block-wise quantization.
@@ -68,17 +68,19 @@ def weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
     Returns:
         None
     """
-    pid_m = tl.program_id(axis=0)
-    pid_n = tl.program_id(axis=1)
-    n = tl.cdiv(N, BLOCK_SIZE)
-    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    offs = offs_m[:, None] * N + offs_n[None, :]
+
+    # 编译后，按照grid网格函数定位对应网格序号进行取数和计算
+    pid_m = tl.program_id(axis=0)                          # 当前网格行序号
+    pid_n = tl.program_id(axis=1)                          # 当前网格列序号
+    n = tl.cdiv(N, BLOCK_SIZE)                             # 每个网格列跨度
+    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) # 网格元素内存指针的的行偏移
+    offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) # 网格元素内存指针的的列偏移
+    offs = offs_m[:, None] * N + offs_n[None, :]           # 先按行定位行绝对位置，再加上偏移 
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
-    s = tl.load(s_ptr + pid_m * n + pid_n)
+    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)     # 根据权重起始指针和二维偏移获得权重
+    s = tl.load(s_ptr + pid_m * n + pid_n)                  # 一维指针，加载一个放缩系数。想象一个二维矩阵，第一个元素从s_ptr开始，按行偏移pid_m * n个缩放系数位置，再向右取当前第pid_n个缩放系数
     y = x * s
-    tl.store(y_ptr + offs, y, mask=mask)
+    tl.store(y_ptr + offs, y, mask=mask)                    # 存储在缓冲区
 
 
 def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
@@ -100,17 +102,19 @@ def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> t
     assert x.dim() == 2 and s.dim() == 2
     M, N = x.size()
     y = torch.empty_like(x, dtype=torch.get_default_dtype())
-    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE']), triton.cdiv(N, meta['BLOCK_SIZE']))
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE']), triton.cdiv(N, meta['BLOCK_SIZE']))                        # 定义网格分块函数，多线程并行计算结果  以(24, 16)分块， 网格每一个点分配给一个线程去执行操作
     weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
     return y
 
 
 fp8_gemm_configs = [
-    Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': 128}, num_stages=num_stages, num_warps=8)
+    Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': 128}, num_stages=num_stages, num_warps=8)  # num_stages和num_warps为并行参数
     for block_m in [16, 32, 64] for block_n in [32, 64, 128] for num_stages in [3, 4, 5, 6]
 ]
 
-@triton.autotune(configs=fp8_gemm_configs, key=['N', 'K'])
+import pdb
+
+@triton.autotune(configs=fp8_gemm_configs, key=['N', 'K']) # 定义自动调优函数，根据核函数传入的N，K进行自动选择
 @triton.jit
 def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
                     a_s_ptr, b_s_ptr,
@@ -137,34 +141,40 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
     Returns:
         None
     """
-    pid_m = tl.program_id(axis=0)
-    pid_n = tl.program_id(axis=1)
+    pid_m = tl.program_id(axis=0)                                              # token grid index
+    pid_n = tl.program_id(axis=1)                                              # 输出维度 grid index
     k = tl.cdiv(K, BLOCK_SIZE_K)
     offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
-    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]
-    a_s_ptrs = a_s_ptr + offs_m * k
-    b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k
+    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]                      # 沿第二个轴定位token绝对位置，加上blocksize偏移
+    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]                      # 沿第一个轴定位参数矩阵行绝对位置，加上blocksize偏移
+    a_s_ptrs = a_s_ptr + offs_m * k                                             # 取对应block的放缩系数, k表示每行划分blocksize的个数
+    b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k                           # 同理取对应block的放缩系数                     
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for i in range(k):
+    for i in range(k):                                                           # 分块矩阵求和
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
-        a_s = tl.load(a_s_ptrs)
+        a_s = tl.load(a_s_ptrs)        
         b_s = tl.load(b_s_ptrs)
-        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
-        a_ptrs += BLOCK_SIZE_K
-        b_ptrs += BLOCK_SIZE_K
-        a_s_ptrs += 1
-        b_s_ptrs += 1
+        
+        pdb.set_trace()
+
+        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]               # 求两者内积，再乘上两者放缩系数
+        a_ptrs += BLOCK_SIZE_K                                                  # 指针偏移blocksize
+        b_ptrs += BLOCK_SIZE_K                                                  # 指针偏移blocksize
+        a_s_ptrs += 1                                                           # 放缩参数指针偏移
+        b_s_ptrs += 1                                                           # 放缩参数指针偏移
     c = accumulator.to(c_ptr.dtype.element_ty)
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+    c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]                       # 取所有指针
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, c, mask=mask)
+    print('aaaaaaaaaaaaaaaaaa')
+    
+    
 
 
 def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor):
@@ -182,10 +192,14 @@ def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Ten
     """
     assert a.is_contiguous() and b.is_contiguous()
     assert a_s.is_contiguous() and b_s.is_contiguous()
-    K = a.size(-1)
-    M = a.numel() // K
-    N = b.size(0)
-    c = a.new_empty(*a.size()[:-1], N, dtype=torch.get_default_dtype())
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))
+    K = a.size(-1)                                                                  # 输入维度
+    M = a.numel() // K                                                              # token总数
+    N = b.size(0)                                                                   # 输出维度
+    c = a.new_empty(*a.size()[:-1], N, dtype=torch.get_default_dtype())             # 存储结果
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))    # 网格按照token数和输出维度进行划分(最终输出形状)
     fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)
     return c
+
+
+if __name__ == '__main__':
+    pass
