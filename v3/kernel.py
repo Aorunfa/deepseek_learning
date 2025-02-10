@@ -143,14 +143,17 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
     """
     pid_m = tl.program_id(axis=0)                                              # token grid index
     pid_n = tl.program_id(axis=1)                                              # 输出维度 grid index
-    k = tl.cdiv(K, BLOCK_SIZE_K)
+    k = tl.cdiv(K, BLOCK_SIZE_K)                                               # 输入维度按
     offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]                      # 沿第二个轴定位token绝对位置，加上blocksize偏移
-    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]                      # 沿第一个轴定位参数矩阵行绝对位置，加上blocksize偏移
-    a_s_ptrs = a_s_ptr + offs_m * k                                             # 取对应block的放缩系数, k表示每行划分blocksize的个数
-    b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k                           # 同理取对应block的放缩系数                     
+
+    pdb.set_trace()
+
+    a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]                      # 沿第二个轴定位token绝对位置，加上blocksize偏移, 得到二维指针。shape: _ ; 16,1 ; 1,128
+    b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]                      # 沿第一个轴定位参数矩阵行绝对位置，加上blocksize偏移, 得到二维指针。shape:_ ; 1,32 ; 128, 1
+    a_s_ptrs = a_s_ptr + offs_m * k                                             # 取对应block的放缩系数, k表示每行划分blocksize的个数，得到一维指针
+    b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k                           # 同理取对应block的放缩系数，得到一维指针                     
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for i in range(k):                                                           # 分块矩阵求和
@@ -159,7 +162,7 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
         a_s = tl.load(a_s_ptrs)        
         b_s = tl.load(b_s_ptrs)
         
-        pdb.set_trace()
+        # pdb.set_trace()
 
         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]               # 求两者内积，再乘上两者放缩系数
         a_ptrs += BLOCK_SIZE_K                                                  # 指针偏移blocksize
@@ -171,11 +174,8 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]                       # 取所有指针
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(c_ptrs, c, mask=mask)
-    print('aaaaaaaaaaaaaaaaaa')
+    tl.store(c_ptrs, c, mask=mask)    
     
-    
-
 
 def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Tensor):
     """
@@ -203,3 +203,8 @@ def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Ten
 
 if __name__ == '__main__':
     pass
+
+    """
+    trion 基础操作与调试学习资料
+    https://github.com/HarleysZhang/llm_note/blob/main/4-hpc_basic/%E7%90%86%E8%A7%A3triton%E5%86%85%E6%A0%B8%E6%95%99%E7%A8%8B1.md
+    """

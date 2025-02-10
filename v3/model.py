@@ -1,5 +1,7 @@
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '2,3'
+os.environ['TRITON_INTERPRET'] = '1'
+
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
