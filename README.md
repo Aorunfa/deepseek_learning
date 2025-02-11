@@ -40,28 +40,87 @@ MOE训练优化：
 
 deepseekV3技术报告中的MTP模块与主模型共享emedding层、输出头。主模型与上一个MTP模块在输出头前的隐态输出到下一个MTP模块，与输入的embedding直接进行相加。
 
+补充：MTP经典方式：并行与串行
 
-MTP经典方式：并行与串行
-        
-        论文，简述差异
-        
-        deepseek采用的方式 [图]
+并行的MTP是指隐藏态同时喂入多个输出头进行，每个输出头对应的gt是依次往后偏移的，如input为`t0 t1 t2 t3`，head1的gt为`t1 t2 t3 t4`，head2的gt为`t2 t3 t4 t5`，依次类推....；串行的MTP则是上一个head的输出作为下一个head的输入(之一)，计算head输出与对应gt损失
 
-        增加MTP的head进行推理加速
+并行的MTP并行地将隐态编码成依次偏移的gt预测，但推理时仍然是预测下一个token，直觉上并行的MTP是不符合推理模式的。串行的MTP结构最开始用于推理的解码过程，用来提高推理的速度，这里在训练时采用，更符合推理模式。
 
-
-MTP开源的推理代码未使用，只在训练时使用。增加一个简单实现
+deepseek采用的方式 [图]
 
 ### fp8量化操作
-量化参数和linear模组，此处只对开源的推理代码中的量化相关的操作进行解读
+开源的推理代码定义了bf16和fp8两种量化推理模式，在linear函数中进行量化或反量化操作，以下只对量化相关的操作进行通俗解读。
 
-量化函数
+注意这一部分适用于理解如何进行自定义量化推理，而量化训练的代码应该还包含更多反向传播的操作
 
-反量化函数
+总体上，使用了triton编写矩阵计算内核，用于并发执行分块矩阵乘法。基本思路是每个进程根据id取数，进行运算，结果写入预定义的内存地址，只覆盖进程id对应的块。所有进程执行完毕，则得到最终的结果。
+
+首先定义了一个网格，用于启动并行执行线程，每个线程获得对应网格点对应的id（一维网格只用序数，二维有行列序数）
+
+以执行fp8反量化矩阵乘法为例进行说明
+```python
+# 定义二维网格，(M, N)表示原始网格行列，（BLOCK_SIZE_M, BLOCK_SIZE_N)表示分块小网格的行列, triton.cdiv表示向上取整
+# 最终进程获得的id为（i，j），对应分块后的位置，映射到原始网格的位置为(i * BLOCK_SIZE_M, j * BLOCK_SIZE_N)
+grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))    
+# 按照网格启动进程，执行分块矩阵乘法。每个进程的id是二维的
+fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)
+"""
+a为token向量, b为线性层参数矩阵, c为存储矩阵, a_s为a的缩放参数矩阵, b_s为线性层缩放参数矩阵, 是按照block_size * block_size二维分块进行量化的
+M为a的token行数, N为b的列数, K为a的token维度
+"""
+```
+
+然后，线程执行核函数，根据id从输入矩阵中取数，这个取数逻辑需要考虑输入矩阵本身是如何进行分块量化的
+```python
+# 进程分配的行id
+pid_m = tl.program_id(axis=0)                                              
+# 进程分配的列id
+pid_n = tl.program_id(axis=1)
+# 计算每个token的维度上进行fp8量化的块数量                                             
+k = tl.cdiv(K, BLOCK_SIZE_K)                                    
+# 计算当前进程在行维度的连续块的绝对位置；一维；百分号用于超边界处理
+offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+# 计算当前进程在列维度的连续块的位置；
+offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+# 量化块的连续位置 array([0, 1, 2, ..., BLOCK_SIZE_K])
+offs_k = tl.arange(0, BLOCK_SIZE_K)
+
+# 取出a对应的分块的内存指针，二维，形状为(BLOCK_SIZE_M，BLOCK_SIZE_K)
+a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+# 取出b对应的分块的内存指针，二维，形状为(BLOCK_SIZE_K, BLOCK_SIZE_N)
+b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]                      
+# 取出a量化缩放矩阵，一维，形状（BLOCK_SIZE_M, 1)，对应每个token第一个量化块的缩放系数
+a_s_ptrs = a_s_ptr + offs_m * k 
+# 取出线性层参数矩阵b的量化参数矩阵，这里b是按照(block_size * block_size)二维块量化                                    
+b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k 
+
+for i in range(k):   # 遍历token行，以block_size作为步长                                                        
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0) # mask为掩码处理超边界填充other
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
+        a_s = tl.load(a_s_ptrs)        
+        b_s = tl.load(b_s_ptrs)
+        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :] # 求两者内积，再乘上两者放缩系数
+        a_ptrs += BLOCK_SIZE_K                                    # 指针偏移blocksize，即行块沿行移动blocksize步长
+        b_ptrs += BLOCK_SIZE_K                                    # 同理
+        a_s_ptrs += 1                                             # 放缩参数指针偏移一位, 放缩参数矩阵的列数为k
+        b_s_ptrs += 1                                             # 放缩参数指针偏移一位, 放缩参数矩阵的列数为k
+```
+
+最后，对应数值进行目标矩阵乘法，结果写入预定义的存储地址，每个进程只写入自己对应的的块
+```python
+c = accumulator.to(c_ptr.dtype.element_ty)                                   # 同步数据格式
+offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]                       # 定位存储区域对应的块
+mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+tl.store(c_ptrs, c, mask=mask)                                                
+```
+
+注意，要进入`@triton.jit`编译的核函数可以使用`import pdb`，在对应的断点位置写一行`pdb.set_trace()`，运行文件后则会进入核函数，可以通过命令行进行交互[pdb](https://github.com/HarleysZhang/llm_note/blob/main/4-hpc_basic/%E7%90%86%E8%A7%A3triton%E5%86%85%E6%A0%B8%E6%95%99%E7%A8%8B1.md)
 
 
 ### 加速通信方法
-
+comming soon
 
 # 二. r1
 r1的使用v3作为基础模型，训练增加了强化学习的策略，使得在标签数据较少的情况下也能学习到知识并泛化

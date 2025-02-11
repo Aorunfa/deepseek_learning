@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 from triton import Config
+import pdb
 
 
 @triton.jit
@@ -22,12 +23,14 @@ def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     """
     pid = tl.program_id(axis=0)                         # 一维网格点的序号
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # 计算绝对位置
-    x = tl.load(x_ptr + offs).to(tl.float32)
+    x = tl.load(x_ptr + offs).to(tl.float32)            # 取数，一维
     s = tl.max(tl.abs(x)) / 448.                        # 计算放缩系数， fp8最大正范围448
-    y = x / s                                           # 进行量化
+    y = x / s                                           # 量化
     y = y.to(y_ptr.dtype.element_ty)
-    tl.store(y_ptr + offs, y)                           # 存量化值
-    tl.store(s_ptr + pid, s)                            # 存放缩系数
+    tl.store(y_ptr + offs, y)                           
+    tl.store(s_ptr + pid, s)                            
+
+    # pdb.set_trace()
 
 """执行fp8量化"""
 def act_quant(x: torch.Tensor, block_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -112,7 +115,6 @@ fp8_gemm_configs = [
     for block_m in [16, 32, 64] for block_n in [32, 64, 128] for num_stages in [3, 4, 5, 6]
 ]
 
-import pdb
 
 @triton.autotune(configs=fp8_gemm_configs, key=['N', 'K']) # 定义自动调优函数，根据核函数传入的N，K进行自动选择
 @triton.jit
@@ -148,7 +150,7 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
     offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    pdb.set_trace()
+    # pdb.set_trace()
 
     a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]                      # 沿第二个轴定位token绝对位置，加上blocksize偏移, 得到二维指针。shape: _ ; 16,1 ; 1,128
     b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]                      # 沿第一个轴定位参数矩阵行绝对位置，加上blocksize偏移, 得到二维指针。shape:_ ; 1,32 ; 128, 1
@@ -156,19 +158,19 @@ def fp8_gemm_kernel(a_ptr, b_ptr, c_ptr,
     b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k                           # 同理取对应block的放缩系数，得到一维指针                     
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for i in range(k):                                                           # 分块矩阵求和
+    for i in range(k):   # 遍历token行，以block_size作为步长                                                        
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
         a_s = tl.load(a_s_ptrs)        
         b_s = tl.load(b_s_ptrs)
         
-        # pdb.set_trace()
+        pdb.set_trace()
 
         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]               # 求两者内积，再乘上两者放缩系数
         a_ptrs += BLOCK_SIZE_K                                                  # 指针偏移blocksize
         b_ptrs += BLOCK_SIZE_K                                                  # 指针偏移blocksize
-        a_s_ptrs += 1                                                           # 放缩参数指针偏移
-        b_s_ptrs += 1                                                           # 放缩参数指针偏移
+        a_s_ptrs += 1                                                           # 放缩参数指针偏移一位, 放缩参数矩阵的列数为k
+        b_s_ptrs += 1                                                           # 放缩参数指针偏移一位, 放缩参数矩阵的列数为k
     c = accumulator.to(c_ptr.dtype.element_ty)
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -197,7 +199,7 @@ def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor, b_s: torch.Ten
     N = b.size(0)                                                                   # 输出维度
     c = a.new_empty(*a.size()[:-1], N, dtype=torch.get_default_dtype())             # 存储结果
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))    # 网格按照token数和输出维度进行划分(最终输出形状)
-    fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)
+    fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)                                                   # 按照网格启动并发任务，执行分块矩阵乘法
     return c
 
 
