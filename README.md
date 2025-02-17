@@ -189,9 +189,12 @@ trl库实现流程:
         -- trl库将该损失放在了收益计算中
      
      价值偏离损失
-                - 价值偏离损失：forward计算的V[t]应该与generate得到的价值Vtarget[t]是相近的
-                -- 目标价值 = 模型t时刻决策 + t时刻前的价值
-                -- 减小模型training过程与inference过程的价值偏离
+
+        - 价值偏离损失：forward计算的V[t]应该与generate得到的价值Vtarget[t]是相近的
+        
+        -- 目标价值 = 模型t时刻决策 + t时刻前的价值
+        
+        -- 减小模型training过程与inference过程的价值偏离
 
 ## GRPO
 
