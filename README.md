@@ -164,23 +164,31 @@ trl 代码理解:
 按照仓库下trl库配置环境，debug直接跑`/deepseek_learning/trl/examples/scripts/ddpo.py`，需要大概24GB，可以通过调整args中的`per_device_train_batch_size`调整显存占用。ppo主体计算逻辑在`deepseek_learning/trl/trl/trainer/ppo_trainer.py`文件的train方法下
 
 trl库实现流程: 
-> 01 生成响应: 策略模型根据prompt自回归生成完整，长度不超过T。和query拼接得到query-response，同时得到对应的logitprobs。获得采样轨迹
+- 01 生成响应: 策略模型根据prompt自回归生成完整，长度不超过T。和query拼接得到query-response，同时得到对应的logitprobs。获得采样轨迹
 
-> 02 生成参考: 参考模型根据query-response进行前向传播得到ref_logitprobs
+- 02 生成参考: 参考模型根据query-response进行前向传播得到ref_logitprobs
 
-> 03 奖励打分: 奖励模型对query-response进行打分，每个pair对应一个分数
+- 03 奖励打分: 奖励模型对query-response进行打分，每个pair对应一个分数
 
-> 04 计算价值: 价值模型对每一个response进采样轨迹评估每一个阶段的价值, score[t]表示做出t时刻决策前的价值评估
+- 04 计算价值: 价值模型对每一个response进采样轨迹评估每一个阶段的价值, score[t]表示做出t时刻决策前的价值评估
 
-> 05 损失计算
-        > 决策收益 Lclip
-                -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * (t + 1)时刻决策前价值
-                -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数
-                - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
-        kl损失 
-                - 计算采样轨迹的new logprobs和old logprobs偏离程度
-                -- trl库将该损失放在了收益计算中
-        - 价值偏离
+- 05 损失计算
+     
+     决策收益 Lclip
+        
+        -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * (t + 1)时刻决策前价值
+        
+        -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数
+        
+        - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
+     
+     kl损失 
+        
+        - 计算采样轨迹的new logprobs和old logprobs偏离程度
+        
+        -- trl库将该损失放在了收益计算中
+     
+     价值偏离损失
                 - 价值偏离损失：forward计算的V[t]应该与generate得到的价值Vtarget[t]是相近的
                 -- 目标价值 = 模型t时刻决策 + t时刻前的价值
                 -- 减小模型training过程与inference过程的价值偏离
