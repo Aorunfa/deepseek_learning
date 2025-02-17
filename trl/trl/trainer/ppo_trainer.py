@@ -499,11 +499,11 @@ class PPOTrainer(Trainer):
 
                 # 4. compute rewards
                 kl = logprobs - ref_logprobs
-                non_score_reward = -args.kl_coef * kl   # kl loss
+                non_score_reward = -args.kl_coef * kl          # kl loss
                 rewards = non_score_reward.clone()
                 actual_start = torch.arange(rewards.size(0), device=rewards.device)
                 actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
-                rewards[[actual_start, actual_end]] += scores   # reward = klloss + score for each quest-response
+                rewards[[actual_start, actual_end]] += scores   # end reward = last kloss + score for each quest-response
 
                 # 5. whiten rewards
                 if args.whiten_rewards:
@@ -520,7 +520,7 @@ class PPOTrainer(Trainer):
                     lastgaelam = delta + args.gamma * args.lam * lastgaelam
                     advantages_reversed.append(lastgaelam)
                 advantages = torch.stack(advantages_reversed[::-1], axis=1)
-                returns = advantages + values                                       # gae 采样轨迹下： t时刻优势 + t时刻价值，表示t时刻决策后的价值
+                returns = advantages + values                                       # gae 采样轨迹下： t时刻决策优势 + t时刻决策前价值，表示t时刻决策后的价值
                 advantages = masked_whiten(advantages, ~padding_mask)
                 advantages = torch.masked_fill(advantages, padding_mask, 0)
                 torch.cuda.empty_cache()
@@ -561,7 +561,7 @@ class PPOTrainer(Trainer):
                             vf_losses1 = torch.square(vpred - mb_return)        # no clipped
                             vf_losses2 = torch.square(vpredclipped - mb_return) # have clipped
                             vf_loss_max = torch.max(vf_losses1, vf_losses2)     # fuse
-                            vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
+                            vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])    # 决策前与基模型决策后的价值偏离不能太大
                             vf_clipfrac = masked_mean(
                                 (vf_losses2 > vf_losses1).float(), ~padding_mask_p1[micro_batch_inds]
                             )

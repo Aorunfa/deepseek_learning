@@ -139,10 +139,10 @@ PPO原理理解 --> trl库代码解读 --> GRPO原理理解 --> verl库实战 --
 ## 强化学习本质思路
 可以理解为初始价值状态出发，每一个时间步，‘人’通过制定一个策略与环境进行交互获得奖励，策略具有一定的优势或劣势，导致下一个时间步的价值发生变化。奖励可以是正的或负的。
 
-经过每个时间步，根据的交互导致的价值减少或增加，‘人’理解到环境的一些偏好，从而优化制定下一个时间步的动作。最终目标是不断提升累积价值。
+经过每个时间步，根据的交互导致的价值减少或增加，‘人’价值变化理解到环境的一些偏好，从而优化制定下一个时间步的动作。最终目标是不断提升累积价值。
 
 ## PPO
-总的来说是需要先训练一个奖励模型，能够评价模型的输出有多符合偏好。在偏好对齐过程，采样一组模型的query-response，基于奖励模型和价值模型评计算采样轨迹收益，取反计入损失项目。同时考虑训练稳定性，每次新模型的输出分布与旧模型尽可能相似。[论文地址](https://arxiv.org/abs/1707.06347)
+总的来说是需要先训练一个奖励模型，能够评价模型的输出有多符合偏好。在偏好对齐过程，采样一组模型的query-response，基于奖励模型和价值模型评计算采样轨迹的收益，取反计入损失项目。同时考虑训练稳定性，每次新模型的输出分布与旧模型尽可能相似。[论文地址](https://arxiv.org/abs/1707.06347)
 
 PPO在LLM后训练的要素介绍:
 > 策略模型 : 训练的目标模型
@@ -178,7 +178,7 @@ trl库实现流程:
         
         -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * (t + 1)时刻决策前价值
         
-        -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数
+        -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数 | GAE计算方法
         
         - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
      
@@ -186,21 +186,33 @@ trl库实现流程:
         
         - 计算采样轨迹的new logprobs和old logprobs偏离程度
         
-        -- trl库将该损失放在了收益计算中
+        -- PPO将该损失放在了reward的计算中
      
      价值偏离损失
 
-        - 价值偏离损失：forward计算的V[t]应该与generate得到的价值Vtarget[t]是相近的
-        
-        -- 目标价值 = 模型t时刻决策 + t时刻前的价值
-        
-        -- 减小模型training过程与inference过程的价值偏离
+        - 价值偏离损失：forward计算的决策前V[t]应该与基模型得到的决策后的价值Vtarget[t]是相近的，限制决策偏离
 
+        -- 基模型t时刻决策后的目标价值 = 模型t时刻决策优势 + t时刻前的价值
+        
 ## GRPO
+先放一张GRPO与PPO算法的对比
 
-论文地址
-论文讲解
-实战：使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler
+<div align="center">
+  <img src="deepseek_learning/doc/grpo.png" alt="grpo vs ppo" width="630" height="307">
+  <p style="font-size: 10px; color: gray;">PPO与GRPO对比</p>
+</div>
+
+GRPO与PPO的不同点在于:
+
+- 01 KL散度移出优势函数的reward计算
+
+- 02 移除value模型，直接对组内多个输出计算reward后进行归一化
+
+
+
+GRPO实战:
+使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler
+
 
 
 ## 补充 DPO
