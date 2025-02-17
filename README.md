@@ -128,9 +128,13 @@ tl.store(c_ptrs, c, mask=mask)
 comming soon
 
 # 二. r1
-背景: [r1](https://github.com/deepseek-ai/DeepSeek-R1)使用v3作为基础模型，训练增加了GROP强化学习的策略，使得在标签数据较少，计算资源较少的的情况下也能学习到知识并泛化。GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理以及代码理解，然后介绍GRPO算法做了哪些进一步的改进。
+背景: 
 
-基本学习路线: PPO原理理解 --> trl库代码解读 --> GRPO原理理解 --> verl库实战 --> 小模型应用强化学习路线
+[r1](https://github.com/deepseek-ai/DeepSeek-R1)使用v3作为基础模型，训练增加了GROP强化学习的策略，使得在标签数据较少，计算资源较少的的情况下也能学习到知识并泛化。GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理以及代码理解，然后介绍GRPO算法做了哪些进一步的改进。
+
+基本学习路线: 
+
+PPO原理理解 --> trl库代码解读 --> GRPO原理理解 --> verl库实战 --> 小模型应用强化学习路线
 
 ## 强化学习本质思路
 可以理解为初始价值状态出发，每一个时间步，‘人’通过制定一个策略与环境进行交互获得奖励，策略具有一定的优势或劣势，导致下一个时间步的价值发生变化。奖励可以是正的或负的。
@@ -156,6 +160,7 @@ PPO在LLM后训练的要素介绍:
 > 状态st : 当前输入的prompt data + 历史生成了的第t-1个token
 
 trl 代码理解: 
+
 按照仓库下trl库配置环境，debug直接跑`/deepseek_learning/trl/examples/scripts/ddpo.py`，需要大概24GB，可以通过调整args中的`per_device_train_batch_size`调整显存占用。ppo主体计算逻辑在`deepseek_learning/trl/trl/trainer/ppo_trainer.py`文件的train方法下
 
 trl库实现流程: 
@@ -168,11 +173,11 @@ trl库实现流程:
 > 04 计算价值: 价值模型对每一个response进采样轨迹评估每一个阶段的价值, score[t]表示做出t时刻决策前的价值评估
 
 > 05 损失计算
-        - 决策收益 Lclip
+        > 决策收益 Lclip
                 -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * (t + 1)时刻决策前价值
                 -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数
                 - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
-        - kl损失 
+        kl损失 
                 - 计算采样轨迹的new logprobs和old logprobs偏离程度
                 -- trl库将该损失放在了收益计算中
         - 价值偏离
