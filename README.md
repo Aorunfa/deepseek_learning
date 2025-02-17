@@ -128,4 +128,57 @@ tl.store(c_ptrs, c, mask=mask)
 comming soon
 
 # 二. r1
-r1的使用v3作为基础模型，训练增加了强化学习的策略，使得在标签数据较少的情况下也能学习到知识并泛化
+[r1](https://github.com/deepseek-ai/DeepSeek-R1)使用v3作为基础模型，训练增加了GROP强化学习的策略，使得在标签数据较少，计算资源较少的的情况下也能学习到知识并泛化
+
+GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理以及代码理解，然后介绍GRPO算法做了哪些进一步的改进。
+
+基本学习路线: PPO原理理解 --> trl库代码解读 --> GRPO原理理解 --> verl库实战 --> 小模型应用强化学习路线
+
+首先介绍强化学习本质思路
+可以理解为初始价值状态出发，每一个时间步，‘人’通过制定一个策略与环境进行交互获得奖励，策略具有一定的优势或劣势，导致下一个时间步的价值发生变化。奖励可以是正的或负的。
+
+经过每个时间步，根据的交互导致的价值减少或增加，‘人’理解到环境的一些偏好，从而更好地制定下一个时间步的动作。最终目标是不断提升值池。
+
+## PPO
+总的来说是需要先训练一个奖励模型，能够评价模型的输出有多符合偏好。在偏好对齐过程，采样一组模型的query-response，基于奖励模型和价值模型评计算采样轨迹收益，取反计入损失项目。同时考虑训练稳定，每次新模型的输出分布与旧模型尽可能相似。[论文地址](https://arxiv.org/abs/1707.06347)
+
+PPO在LLM后训练的要素介绍:
+> 策略模型 : 训练的目标模型
+> 参考模型 : 基于规则或基于模型，输出参考策略，用于对照输出策略，避免每次输出策略偏离过大
+> 奖励模型 : 对生成的query-response进行打分, response 来自于策略模型自回归生成。奖励模型应该是可提供训练偏好指导的
+> 价值模型 : 基于模型，评估在已生成response t个token下，生成的第t+1个token的价值 (即st状态的价值)
+> T : 轨迹抽样长度，对应最大的生成序列长度
+> 策略分布 : 自回归每次下一个token，logits的分布对应策略分布
+> 状态st : 当前输入的prompt data + 历史生成了的第t-1个token
+
+
+trl 代码理解: 
+按照仓库下trl库配置环境，debug直接跑`/deepseek_learning/trl/examples/scripts/ddpo.py`，需要大概24GB，可以通过调整args中的`per_device_train_batch_size`调整显存占用。ppo主体计算逻辑在`deepseek_learning/trl/trl/trainer/ppo_trainer.py`文件的train方法下
+
+trl库实现流程
+> 01 生成响应: 策略模型根据prompt自回归生成完整，长度不超过T。和query拼接得到query-response，同时得到对应的logitprobs。获得采样轨迹
+> 02 生成参考: 参考模型根据query-response进行前向传播得到ref_logitprobs
+> 03 奖励打分: 奖励模型对query-response进行打分，每个pair对应一个分数
+> 04 计算价值: 价值模型对每一个response进采样轨迹评估每一个阶段的价值, score[t]表示做出t时刻决策前的价值评估
+> 05 损失计算
+        - 决策收益 Lclip
+                -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * (t + 1)时刻决策前价值
+                -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(t), d为和采样时间步相关的衰减函数
+                - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
+        - kl损失 
+                - 计算采样轨迹的new logprobs和old logprobs偏离程度
+                -- trl库将该损失放在了收益计算中
+        - 价值偏离
+                - 价值偏离损失：forward计算的V[t]应该与generate得到的价值Vtarget[t]是相近的
+                -- 目标价值 = 模型t时刻决策 + t时刻前的价值
+                -- 减小模型training过程与inference过程的价值偏离
+
+## GRPO
+
+论文地址
+论文讲解
+实战：使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler
+
+
+## 补充 DPO
+从PPO的损失函数出发，推到一个显式的损失函数，从而可以跳过奖励函数的训练过程，直接根据偏好数据集训练sft模型
