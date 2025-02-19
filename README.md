@@ -129,11 +129,16 @@ comming soon
 
 # 二. r1
 背景: 
-
 [r1](https://github.com/deepseek-ai/DeepSeek-R1)使用v3作为基础模型，训练增加了GROP强化学习的策略，使得在标签数据较少，计算资源较少的的情况下也能学习到知识并泛化。GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理以及代码理解，然后介绍GRPO算法做了哪些进一步的改进。
 
-基本学习路线: 
+r1做的事情和启示
+r1-zero不足，r1针对性做了哪些优化。
 
+对于小模型思维链推理能力的涌现：直接蒸馏来着大模型的推理过程数据比使用强化学习更好
+
+
+
+基本学习路线: 
 PPO原理理解 --> trl库代码解读 --> GRPO原理理解 --> verl库实战 --> 小模型应用强化学习路线
 
 ## 强化学习本质思路
@@ -195,24 +200,55 @@ trl库实现流程:
         -- 基模型t时刻决策后的目标价值 = 模型t时刻决策优势 + t时刻前的价值
         
 ## GRPO
-先放一张GRPO与PPO算法的对比
+先放一张GRPO(Group Relative Policy Optimization)与PPO算法的对比
 
 <div align="center">
-  <img src="deepseek_learning/doc/grpo.png" alt="grpo vs ppo" width="630" height="307">
+  <img src="doc/grpo.png" alt="grpo vs ppo" width="630" height="307">
   <p style="font-size: 10px; color: gray;">PPO与GRPO对比</p>
 </div>
 
 GRPO与PPO的不同点在于:
 
-- 01 KL散度移出优势函数的reward计算
+- 01 GTPO对query采样多个response作为一个group
 
-- 02 移除value模型，直接对组内多个输出计算reward后进行归一化
+- 02 KL散度损失移出reward的计算，单独加入损失函数
+
+- 03 移除value模型，不对每一个token计算价值，直接使用奖励函数对组内多个response打分作为reward 
+
+- 04 对组内的reward进行归一化作为替代采样轨迹每个决策的优势
+
+GRPO直观理解:
+
+PPO的价值函数本身就是价值评估的一种近似，对每个step token的价值估计本身质量并不高。相较之下，监督训练过的奖励模型打分奖励质量更高，直接使用奖励打分作为优势估计在一定程度上能避免低质量的价值估计干扰。
+
+此时优化目标变成了结果导向的最大化奖励，而不需要考虑过程路径的价值变化。直观上更符合机器学习的本质。当数据量足够大时，应该是奏效的。
+
+R1-zero 训练
+基于deepseekv3基模型，直接使用RL方法进行后训练。奖励函数采用基于规则的判别方式，具体包括:
+
+- 准确度判断
+
+- 格式判断
+
+优势：自发延长推理时间，提高输出质量。不足：输出的可读性差，语言混合
+
+R1训练:
+
+- SFT 少量Cot数据冷启动
+
+- GRPO 语言一致性奖励缓解回的的混合语言问题
+
+- SFT 拒绝采用过滤高质量cot数据和通用数据
+
+- GRPO 采用联合奖励
 
 
 
 GRPO实战:
-使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler
 
+使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler || https://github.com/Jiayi-Pan/TinyZero
+
+open_r1源码解读
 
 
 ## 补充 DPO
