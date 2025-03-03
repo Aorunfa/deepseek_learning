@@ -19,7 +19,7 @@ deepseekV3开源的推理代码兼容分布式多卡推理，将embedding, MLA, 
 传统kv缓存生成方式：预测得到下一个token，将其追加到历史输入进行前向传播，对该token生成k-v键值对，如`k = h * Wk`，追加到历史token的k-v缓存矩阵后进行前向计算。下一次计算计算时，不需要再计算获得该token的k-v键值对。牺牲了存储空间节省了计算量
 
 <div align="center">
-  <img src="doc/MLA.png" alt="grpo vs ppo" width="500" height="320">
+  <img src="doc/MLA.png" alt="grpo vs ppo" width="600" height="380">
   <p style="font-size: 10px; color: gray;">MLA</p>
 </div>
 
@@ -32,7 +32,7 @@ deepseekV3开源的推理代码兼容分布式多卡推理，将embedding, MLA, 
 MOE模块设置了共享专家和专精专家（routed_experts），每一个专家都是一个小的MLP层，专精专家由一个路由gate分类头进行分配(线性层，输出维度为专精专家数)，激活topk的专精专家进行前向传播。
 
 <div align="center">
-  <img src="doc/Moe.png" alt="grpo vs ppo" width="500" height="280">
+  <img src="doc/Moe.png" alt="grpo vs ppo" width="600" height="320">
   <p style="font-size: 10px; color: gray;">Moe</p>
 </div>
 
