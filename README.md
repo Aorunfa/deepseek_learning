@@ -209,13 +209,13 @@ trl库实现流程:
 
 GRPO与PPO的不同点在于:
 
-- 01 GTPO对query采样多个response作为一个group
+- GRPO对query采样多个response作为一个group
 
-- 02 KL散度损失移出reward的计算，单独加入损失函数
+- KL散度损失移出reward的计算，单独加入损失函数
 
-- 03 移除价值模型，不对每一个token计算价值，直接使用奖励函数对组内多个response打分作为reward 
+- 移除了价值模型，不对轨迹内每一次token预测计算价值，直接使用奖励函数对组内多个response打分作为reward 
 
-- 04 对组内的reward进行归一化作为替代采样轨迹每个决策的优势
+- 对组内的reward进行归一化作为替代采样轨迹每个决策的优势
 
 GRPO直观理解:
 
@@ -223,32 +223,20 @@ PPO的价值函数本身就是价值评估的一种近似，对每个step token�
 
 此时优化目标变成了结果导向的最大化奖励，而不需要考虑过程路径的价值变化。直观上更符合机器学习的本质。当数据量足够大时，应该至少是有一些效果的
 
-R1-zero 训练
-基于deepseekv3基模型，直接使用RL方法进行后训练。奖励函数采用基于规则的判别方式，具体包括:
-
+R1-zero 训练:   
+基于deepseekv2基模型，直接使用RL方法进行后训练。奖励函数采用基于规则的判别方式，具体包括:
 - 准确度判断
-
 - 格式判断
+- 优势：自发延长推理时间，提高输出质量。不足：输出的可读性差，语言混合
 
-优势：自发延长推理时间，提高输出质量。不足：输出的可读性差，语言混合
-
-R1训练:
-
+R1训练:   
 - SFT 少量Cot数据冷启动
+- GRPO 语言一致性奖励缓解回的的混合语言问题. 奖励函数增加规则语言混合的乘法
+- SFT 过滤高质量cot数据和通用数据
+- GRPO 采用联合奖励：基于准确度和基于规则
 
-- GRPO 语言一致性奖励缓解回的的混合语言问题
-
-- SFT 拒绝采用过滤高质量cot数据和通用数据
-
-- GRPO 采用联合奖励
-
-
-
-GRPO实战:
-
-使用verl进行GRPO训练qwen-0.5b https://github.com/agentica-project/deepscaler || https://github.com/Jiayi-Pan/TinyZero
-
-open_r1源码解读
+GRPO实战:  
+实战[从头实现GRPO提升数值问答能力](https://github.com/aburkov/theLMbook)
 
 
 ## 补充 DPO
