@@ -257,8 +257,15 @@ R1训练:
 - SFT 过滤高质量cot数据和通用数据
 - GRPO 采用联合奖励：基于准确度和基于规则
 
-GRPO实战:  
-实战[从头实现GRPO提升数值问答能力](https://github.com/aburkov/theLMbook)
+### GRPO实战 
+使用实战项目快速进行代码理解，[从头实现GRPO提升数值问答能力](https://github.com/aburkov/theLMbook)
+
+- 奖励模型使用规则函数，包括数值计算准确性和输出格式是否包含推理标签的奖励评价
+- 每个prompt生成一组多个response，奖励模型计算对应的reward
+- 组内奖励进行去中心化
+- 
+
+
 
 
 ## 补充 DPO
