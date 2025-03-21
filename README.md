@@ -6,12 +6,12 @@
 
 技术讲解资料可以参考[EZ.Encoder](https://www.youtube.com/@ez.encoder.academy)
 
-## 代码说明
+## 1.1 代码说明
 deepseekV3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size`, `dist.all_reduce()`等分布式推理的map-reduce的操作。
 
 可以运行v3/model.py配置进行代码阅读，建议先跳过linear函数中量化与反量化操作
 
-## 模型结构
+## 1.2 模型结构相关
 ### MLA 多头低秩注意力
 *背景：*   
 传统模型在推理时使用kv缓存进行加速，当文本越长需要的显存消耗越大（线性），MLA通过优化kv缓存机制，降低推理需要的显存消耗
@@ -53,7 +53,7 @@ deepseekV3使用第二种loss-free方法，在每个专家的logits加上一个b
 
 同时，deepseekV3使用一种sequence层面的损失，避免每次的sequence的token只分配给很少的几个专家
            
-## 训练
+## 1.3 训练相关
 ### MTP 多token预测监督 
 *背景：*   
 decoder-only的问答模型只监督下一token的预测，但人在组织语言输出时，通预见常不止一个文字，可能是一个词、一个句柄或一小段话，这更有利与语言组织的准确性。
@@ -143,7 +143,7 @@ tl.store(c_ptrs, c, mask=mask)
 注意，要进入`@triton.jit`编译的核函数可以使用`import pdb`，在对应的断点位置写一行`pdb.set_trace()`，运行文件后则会进入核函数，可以通过命令行进行交互[pdb](https://github.com/HarleysZhang/llm_note/blob/main/4-hpc_basic/%E7%90%86%E8%A7%A3triton%E5%86%85%E6%A0%B8%E6%95%99%E7%A8%8B1.md)
 
 
-### 加速通信方法
+## 1.4 加速通信方法
 pending...
 
 # 二. r1
@@ -198,7 +198,7 @@ GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理�
 
 > 状态st : 当前输入的prompt + 历史生成了的第t-1个token，作为生成第t个token的状态
 
-### 实战: trl 代码理解
+### 实战: trl代码理解
 
 按照仓库下trl库配置环境，debug直接跑`/deepseek_learning/trl/examples/scripts/ddpo.py`，需要大概24GB，可以通过调整args中的`per_device_train_batch_size`调整显存占用。ppo主体计算逻辑在`deepseek_learning/trl/trl/trainer/ppo_trainer.py`文件的train方法下
 
@@ -283,6 +283,6 @@ R1训练:  四个阶段，两个sft两个grpo，使用基于规则和准确度�
 - 每一次iteration更新一次参考模型
 - **损失是逐渐变大的**，由于loss包含了kloss和奖励评分的相反数，当策略模型更新逐渐偏离参考模型，kloss是增加的，导致从loss变大。观测模型的效果应该考虑总的奖励评分是不是增加的。具体参考这个[issue](https://github.com/aburkov/theLMbook/issues/6)
 
-## 补充 DPO
+## 2.3 DPO补充
 从PPO的损失函数出发，推到一个显式的损失函数，从而可以跳过奖励函数的训练过程，直接根据偏好数据集训练sft模型
 ongoing...
