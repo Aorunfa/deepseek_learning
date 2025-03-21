@@ -274,7 +274,7 @@ R1训练:  四个阶段，两个sft两个grpo，使用基于规则和准确度�
 - GRPO 采用联合奖励：基于准确度和基于规则
 
 ### GRPO实战 
-使用实战项目快速进行代码理解，[从头实现GRPO提升数值问答能力](https://github.com/aburkov/theLMbook)
+使用实战项目快速进行代码理解，[从头实现GRPO提升数值问答能力](https://github.com/aburkov/theLMbook)，也可以参考本仓库/grpo/GROP.py的代码注释
 
 - 奖励模型使用规则函数，包括计算结果的准确性和输出格式是否包含推理提示标签的奖励评价，如```<reasoning>...</reasoning> <answer>...<answer/>```
 - 每个prompt采样生成一组多个response以及对应的logits probs
@@ -282,7 +282,6 @@ R1训练:  四个阶段，两个sft两个grpo，使用基于规则和准确度�
 - 使用近似的kl loss度量参考模型和策略模型的差异
 - 每一次iteration更新一次参考模型
 - **损失是逐渐变大的**，由于loss包含了kloss和奖励评分的相反数，当策略模型更新逐渐偏离参考模型，kloss是增加的，导致从loss变大。观测模型的效果应该考虑总的奖励评分是不是增加的。具体参考这个[issue](https://github.com/aburkov/theLMbook/issues/6)
-
 
 ## 补充 DPO
 从PPO的损失函数出发，推到一个显式的损失函数，从而可以跳过奖励函数的训练过程，直接根据偏好数据集训练sft模型
