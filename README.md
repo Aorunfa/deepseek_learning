@@ -4,7 +4,7 @@
 # 一. v3
 技术报告与代码来自[DeepSeek-V3](https://github.com/deepseek-ai/DeepSeek-V3)
 
-学习讲解资料来自[EZ.Encoder](https://www.youtube.com/@ez.encoder.academy)
+技术讲解资料可以参考[EZ.Encoder](https://www.youtube.com/@ez.encoder.academy)
 
 ## 代码说明
 deepseekV3开源的推理代码兼容分布式多卡推理，将embedding, MLA, MOE模块中的线性层平分到所有的卡中，使得小显存卡也能组合起来运行。在阅读代码时需要注意`// word_size`, `dist.all_reduce()`等分布式推理的map-reduce的操作。
@@ -170,7 +170,7 @@ GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理�
 
 这里强化学习的调整方法也很直接，通过采样完整的生成轨迹，计算总体的奖励，计算每一个轨迹点的交互优势，以此衡量每一次logits probs分布里面对应采样点的优势，以此对完成交互过程的监督以及logits 分布的调整
 
-## PPO
+## 2.1 PPO
 总的来说是需要先训练一个奖励模型，能够评价模型的输出有多符合偏好。在偏好对齐过程，采样一组模型的query-response。设置一个价值模型，基于奖励模型和价值模型评计算采样轨迹的收益，取反计入损失项目(GAE 广义的优势评估)。
 
 **这里即考虑最终结果的奖励，又要考虑生成轨迹的好坏**，即若对同一个query产生多个奖励相同的response，最终的response优劣还与生成轨迹有关，当然ppo只对一个query产生一个response
@@ -198,7 +198,7 @@ GRPO算法是基于PPO算法的改进，下面会先介绍PPO的算法的原理�
 
 > 状态st : 当前输入的prompt + 历史生成了的第t-1个token，作为生成第t个token的状态
 
-### trl 代码理解: 
+### 实战: trl 代码理解
 
 按照仓库下trl库配置环境，debug直接跑`/deepseek_learning/trl/examples/scripts/ddpo.py`，需要大概24GB，可以通过调整args中的`per_device_train_batch_size`调整显存占用。ppo主体计算逻辑在`deepseek_learning/trl/trl/trainer/ppo_trainer.py`文件的train方法下
 
@@ -233,7 +233,7 @@ trl库实现流程:
 
       - 基模型t时刻决策后的目标价值 = 模型t时刻决策优势 + t时刻前的价值
         
-## GRPO
+## 2.2 GRPO
 先放一张GRPO(Group Relative Policy Optimization)与PPO算法的对比
 
 <div align="center">
@@ -249,7 +249,7 @@ GRPO与PPO的不同点在于:
 
 - 移除了价值模型，不对轨迹内每一次token预测计算价值，直接使用奖励函数对组内多个response打分作为reward 
 
-- 对组内的reward进行归一化作为替代采样轨迹每个决策的优势
+- 对组内的reward进行归一化作为替代采样轨迹每个采样点的优势
 
 GRPO直观理解:
 
