@@ -213,25 +213,25 @@ trl库实现流程:
 
 - 损失计算
      
-     Loss_clip 决策收益 
+     > loss_clip决策损失 
         
-        -- t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * [t + 1]时刻决策前价值
+      > - t时刻决策优势：zt = t时刻决策奖励 - t时刻决策前价值 + 衰减系数 * [t + 1]时刻决策前价值
         
-        -- t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(T), d为和采样时间步相关的衰减函数 | GAE计算方法
+      > - t时刻决策优势期望：At = zt + d(t + 1) * z(t + 1) + ... + d(T) * z(T), d为和采样时间步相关的衰减函数 | GAE计算方法
         
-        - 决策期望收益：累加(new_policy(t | st) / old_policy(t | st) * At)
+      > - 带clip的决策期望收益：累加[ratio_clip * At]，ratio_clip = clip[new_policy(t | st) / old_policy(t | st), 1 - epsilon, 1 + epsilon]。取反加入总损失
      
-     kl损失 
+     > kl损失 
         
-        - 计算策略模型的采样轨迹的new logprobs和参考模型的old logprobs偏离程度
+      > - 计算策略模型的采样轨迹的new logprobs和参考模型的old logprobs偏离程度
         
-        -- PPO将该损失放在了reward的计算中
+      > - PPO将该损失放在了reward的计算中
      
-     价值偏离损失
+     > 价值偏离损失
 
-        - 价值偏离损失：forward计算的决策前V[t]应该与基模型得到的决策后的价值Vtarget[t]是相近的，限制决策偏离
+      > - 价值偏离损失：forward计算的决策前V[t]应该与基模型得到的决策后的价值Vtarget[t]是相近的，限制价值偏离估计不能太大
 
-        -- 基模型t时刻决策后的目标价值 = 模型t时刻决策优势 + t时刻前的价值
+      > - 基模型t时刻决策后的目标价值 = 模型t时刻决策优势 + t时刻前的价值
         
 ## GRPO
 先放一张GRPO(Group Relative Policy Optimization)与PPO算法的对比
