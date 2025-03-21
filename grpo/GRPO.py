@@ -1,9 +1,10 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 import numpy as np
 import random
 import torch
 import torch.nn.functional as F
 import copy
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
@@ -32,6 +33,7 @@ def set_random_seed(seed: int = 42):
 
 set_random_seed(42)
 
+# 触发推理能力的系统提示
 SYSTEM_PROMPT = """
 Respond in the following format:
 
@@ -41,7 +43,7 @@ Respond in the following format:
 <answer>
 ...
 </answer>
-"""      # 触发推理能力的系统提示
+""" 
 
 def prepare_dataset(split="train"):
     """Load and prepare the GSM8K dataset for training with string prompts."""
@@ -524,8 +526,8 @@ def generate_completions(model, tokenizer, prompts, num_generations=4, max_compl
         prompt_ids,
         attention_mask=prompt_mask,
         max_new_tokens=max_completion_length,
-        do_sample=True,                             # 必须设置true才能进行logis的随机采样
-        temperature=1.0,
+        do_sample=True,                                         # 必须设置true才能进行logis的随机采样
+        temperature=1.0,                                        # 1.0 不对分布进行锐化或钝化
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id
     )
@@ -558,8 +560,8 @@ def generate_rollout_data(model, ref_model, tokenizer, batch_samples, num_genera
     device = next(model.parameters()).device
 
     # Extract prompts and answers.
-    prompts = [sample["prompt"] if isinstance(sample, dict) else sample[0] for sample in batch_samples]
-    answers = [sample["answer"] if isinstance(sample, dict) else sample[1] for sample in batch_samples]
+    prompts = [sample["prompt"] if isinstance(sample, dict) else sample[0] for sample in batch_samples]     
+    answers = [sample["answer"] if isinstance(sample, dict) else sample[1] for sample in batch_samples]     # 数字答案
 
     # Generate completions and associated masks.
     # We generate once, and then use the same completions to compute both sets of log probabilities.
@@ -568,29 +570,29 @@ def generate_rollout_data(model, ref_model, tokenizer, batch_samples, num_genera
             model, tokenizer, prompts, num_generations, max_completion_length
         )
 
-        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-        logits_to_keep = completion_ids.size(1)
+        input_ids = torch.cat([prompt_ids, completion_ids], dim=1)                                          # 问题 + 回答
+        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)                                   # 问题mask + 回答mask，由于截长补短操作产生，用于后续的teach force forward
+        logits_to_keep = completion_ids.size(1)                                                             # 后续需要获取logits probs的数量
 
         # Compute old_log_probs from the current model, with gradients disabled.
-        old_log_probs = compute_log_probabilities(model, input_ids, attention_mask, logits_to_keep)         # 获取策略模型的logits prob输出，teacher force 
+        old_log_probs = compute_log_probabilities(model, input_ids, attention_mask, logits_to_keep)         # 获取策略模型的logits prob输出，teacher force forward
         
         # Compute ref_log_probs from the reference model, which remains static.
-        ref_log_probs = compute_log_probabilities(ref_model, input_ids, attention_mask, logits_to_keep)     # 获取参考模型的logits prob输出，teacher force
+        ref_log_probs = compute_log_probabilities(ref_model, input_ids, attention_mask, logits_to_keep)     # 获取参考模型的logits prob输出，teacher force forward
 
-    formatted_completions = [
+    formatted_completions = [                                                                               # decode ids为对应的字符串输出
         [{'content': tokenizer.decode(ids, skip_special_tokens=True)}]
         for ids in completion_ids
     ]
-    repeated_prompts = [p for p in prompts for _ in range(num_generations)]
+    repeated_prompts = [p for p in prompts for _ in range(num_generations)]                                 # 每个部分重复组内采样次数，对齐prompt-answer的gt和预测
     repeated_answers = [a for a in answers for _ in range(num_generations)]
 
     return {
-        "input_ids": input_ids,             # question(left pad) + answer(right eos)
+        "input_ids": input_ids,                 # question(left pad) + answer(right eos)
         "attention_mask": attention_mask,
         "completion_mask": completion_mask,
-        "old_log_probs": old_log_probs,     # Static log probs from the current model (old policy)
-        "ref_log_probs": ref_log_probs,     # Static log probs from the reference model
+        "old_log_probs": old_log_probs,         # Static log probs from the current model (old policy)
+        "ref_log_probs": ref_log_probs,         # Static log probs from the reference model
         "formatted_completions": formatted_completions,
         "repeated_prompts": repeated_prompts,
         "repeated_answers": repeated_answers,
@@ -611,18 +613,18 @@ def compute_group_relative_advantages(rewards, num_generations):
         torch.Tensor: Tensor of advantages computed relative to the group mean.
     """
     # Reshape rewards to group by prompt
-    rewards_by_group = rewards.view(-1, num_generations)
+    rewards_by_group = rewards.view(-1, num_generations)                                                   # reshape成(batch, 采样轨迹数)
     
     # Compute mean and standard deviation for each prompt group
-    group_means = rewards_by_group.mean(dim=1)
-    group_stds = rewards_by_group.std(dim=1)
+    group_means = rewards_by_group.mean(dim=1)                                                              # 计算组内均值
+    group_stds = rewards_by_group.std(dim=1)                                                                # 计算组内方差
     
     # Expand the means and stds to match the original flat rewards tensor shape
-    expanded_means = group_means.repeat_interleave(num_generations)
+    expanded_means = group_means.repeat_interleave(num_generations)                                         # repeat对齐原来的reward形状
     expanded_stds = group_stds.repeat_interleave(num_generations)
     
-    # Normalize rewards to get advantages 计算去中心化之后每个输出的相对优势
-    advantages = (rewards - expanded_means) / (expanded_stds + 1e-4)
+    # Normalize rewards to get advantages
+    advantages = (rewards - expanded_means) / (expanded_stds + 1e-4)                                        # 奖励去中心化，输出每个采样轨迹相对组内其他轨迹的优势
     
     return advantages.unsqueeze(1)  # Add dimension for token-wise operations
 
@@ -654,7 +656,7 @@ def maximize_grpo_objective(model, ref_model, rollout_data, tokenizer, reward_fu
     logits_to_keep = rollout_data["logits_to_keep"]
     
     # Compute current log probabilities
-    current_log_probs = compute_log_probabilities(model, input_ids, attention_mask, logits_to_keep)
+    current_log_probs = compute_log_probabilities(model, input_ids, attention_mask, logits_to_keep)              # teacher force forward获取logits probs，计算是带有梯度
     
     # Compute policy ratio
     ratio = torch.exp(current_log_probs - old_log_probs)
@@ -664,8 +666,8 @@ def maximize_grpo_objective(model, ref_model, rollout_data, tokenizer, reward_fu
     repeated_prompts = rollout_data["repeated_prompts"]
     repeated_answers = rollout_data["repeated_answers"]
     
-    # Compute rewards 对每组每个输出进行评分
-    rewards = torch.tensor(
+    # Compute rewards 
+    rewards = torch.tensor(                                                                                       # 对每组采样轨迹出进行奖励评分 batch_size * num_generations
         reward_function(prompts=repeated_prompts, completions=formatted_completions, answer=repeated_answers),
         dtype=torch.float32,
         device=next(model.parameters()).device
@@ -676,19 +678,19 @@ def maximize_grpo_objective(model, ref_model, rollout_data, tokenizer, reward_fu
     # Compute advantages using group-relative normalization
     batch_size = rollout_data["batch_size"]
     num_generations = rollout_data["num_generations"]
-    advantages = compute_group_relative_advantages(rewards, num_generations)
+    advantages = compute_group_relative_advantages(rewards, num_generations)                                        # 计算组内采样轨迹的相对优势
     
     # Compute surrogate loss with clipping
-    surrogate1 = ratio * advantages # 偏移量衰减，将输出最终的评分作为每个token轨迹点的优势
-    surrogate2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages
-    surrogate_loss = torch.min(surrogate1, surrogate2)  # 使用ppo中的clip损失
+    surrogate1 = ratio * advantages                                                                                 # 使用采用轨迹的相对优势作为每个采样点的优势
+    surrogate2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * advantages                                          
+    surrogate_loss = torch.min(surrogate1, surrogate2)                                                              # 使用ppo中的优势clip操作，保证每次更新的变化不要太大
     
     # Compute KL divergence penalty
-    kl_div = torch.exp(ref_log_probs - current_log_probs) - (ref_log_probs - current_log_probs) - 1
+    kl_div = torch.exp(ref_log_probs - current_log_probs) - (ref_log_probs - current_log_probs) - 1                 # 计算近似的kl loss
     
     # Combine losses
-    per_token_loss = surrogate_loss - beta * kl_div
-    loss = -((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+    per_token_loss = surrogate_loss - beta * kl_div                                                                 # 优势 - 损失
+    loss = -((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()                     # mask掉填充的部分，取负计算总损失
     
     # Optimization step
     optimizer.zero_grad()
@@ -741,7 +743,7 @@ def train_with_grpo(model,
         print(f"\nStarting iteration {iteration}/{num_iterations}")
         
         # Create reference model for KL constraint
-        reference_model = copy.deepcopy(policy_model)                   # 参考模型, 设置eval模式
+        reference_model = copy.deepcopy(policy_model)                           # 参考模型, 设置eval模式, 每轮更新一次参考模型
         reference_model.eval()
         for param in reference_model.parameters():
             param.requires_grad = False
@@ -752,20 +754,20 @@ def train_with_grpo(model,
         policy_model.train()
         
         # Inner loop for policy updates
-        for step in range(1, steps_per_iteration + 1):                 # steps per iteration
+        for step in range(1, steps_per_iteration + 1):                          # 每轮训练多少个step
             # Sample batch of prompts
             batch_samples = random.sample(train_data, batch_size)
             
             # Set old policy for this step
             with torch.no_grad():
                 # Generate completions and compute log probs
-                rollout_data = generate_rollout_data(                   # 基于当前状态进行轨迹采样
+                rollout_data = generate_rollout_data(                           # 基于当前状态进行轨迹采样，每个prompt采样一组轨迹，并得到对应的logits probs和其他信息
                     policy_model, reference_model, tokenizer, 
                     batch_samples, num_generations, max_completion_length
                 )
             
             # Multiple GRPO updates per batch of generations
-            for grpo_iter in range(1, mu + 1):                          # 基于采样数据更新策略模型多次
+            for grpo_iter in range(1, mu + 1):                                  # 基于采样数据更新策略模型多次
                 loss_value = maximize_grpo_objective(
                     policy_model, reference_model, rollout_data, tokenizer,
                     reward_function, optimizer, beta, epsilon
@@ -790,7 +792,7 @@ def optimize_model_memory(model):
     # Enable gradient checkpointing
     model.gradient_checkpointing_enable()
     
-    # Enable input gradients properly        ### 确保启用gradient_checkpointing是有效的
+    # Enable input gradients properly                                   ### 确保启用gradient_checkpointing是有效的，只保留部分中间激活值，未保留的部分将在backward时由最近的激活值进行重新计算
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     else:
@@ -856,7 +858,7 @@ def main():
     # Randomize the order of examples.
     random.shuffle(all_data)
     # Use a small subset (e.g., 30 examples) for evaluation.
-    num_eval_examples = 10
+    num_eval_examples = 1 # TODO for test
     eval_data = all_data[:num_eval_examples]
 
     # Evaluate the initial performance of the model before any finetuning.
@@ -876,17 +878,18 @@ def main():
 
     # Define RL training configuration.
     training_config = {
-        'num_iterations' : 1,
-        'steps_per_iteration': 500,          # Total number of RL training steps.
-        'batch_size': 4,                     # Number of samples per training step.
-        'num_generations': 16,               # Number of completions generated per prompt.
-        'max_completion_length': 500,        # Maximum token length for each generated completion.
-        'beta': 0.04,                        # KL divergence penalty coefficient.
-        'learning_rate': 5e-6,               # Learning rate for RL fine-tuning.
-        'mu': 1,
-        'epsilon': 0.1,
-        'reward_function': combined_reward
+        'num_iterations' : 1,                # 训练轮数
+        'steps_per_iteration': 500,          # 每轮训练多少个step
+        'batch_size': 4,                    
+        'num_generations': 16,               # 每个prompt采样一组轨迹，组内轨迹数量
+        'max_completion_length': 500,        # 采样轨迹的最大长度，对应response的最大长度，截长补短，使用mask进行mini-batch的操作
+        'beta': 0.04,                        # kl loss的权重系数
+        'learning_rate': 5e-6,               # 学习率
+        'mu': 1,                             # 每个step对同一束batch进行多少次强化更新
+        'epsilon': 0.1,                      # clip loss ??? TODO
+        'reward_function': combined_reward   # 基于规则的奖励模型
     }
+
     # Fine-tune the model using GRPO RL training.
     model = train_with_grpo(
         model=model,
@@ -915,5 +918,5 @@ if __name__ == "__main__":
     # data = prepare_dataset()
 
     """
-    nohup /local/dev0/anaconda3/envs/qw/bin/python /home/chaofeng/workhome/deepseek_learning/grpo/GRPO.py > /home/chaofeng/workhome/deepseek_learning/n.log 2>&1 &
+    nohup /home/chaofeng/.conda/envs/rl/bin/python /home/chaofeng/workhome/chaofeng/deepseek_learning/grpo/GRPO.py > /home/chaofeng/workhome/chaofeng/deepseek_learning/n.log 2>&1 &
     """
