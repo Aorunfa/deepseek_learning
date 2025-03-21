@@ -1,5 +1,5 @@
-# deepseek_learning - ongoing
-一个快速学习deepseek v3模型以及r1强化学习的仓库，侧重快速理解技术报告模型设计细节
+# About
+一个快速学习deepseekv3模型以及r1强化学习的仓库，侧重快速理解技术报告、模型设计细节和相关原理；配套可阅读代码和注释
 
 # 一. v3
 技术报告与代码来自[DeepSeek-V3](https://github.com/deepseek-ai/DeepSeek-V3)
